@@ -9,37 +9,61 @@ import (
 	"syscall"
 	"time"
 	"whatsapp-gateway/gateway"
+
+	"github.com/joho/godotenv"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
-	// 1. Create a buffered channel for incoming WhatsApp payloads
-	// The struct name inside gateway/handler.go is WhatsAppPayload
-	payloadQueue := make(chan gateway.WhatsAppPayload, 1000)
-
-	// 2. Start a worker pool of 10 concurrent goroutines
-	log.Println("Starting background worker pool...") // Fixed: Println (Capital P)
-	for i := 1; i <= 10; i++ {
-		go gateway.StartWorker(i, payloadQueue)
+	// 1. Load the local .env configuration file
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("Warning: No .env file found, reading from system env vars")
 	}
 
-	// 3. Initialize the HTTP handler
-	appHandler := gateway.NewHandler(payloadQueue)
+	// 2. Fetch the connection string safely
+	dbConnectionString := os.Getenv("DATABASE_URL")
+	if dbConnectionString == "" {
+		log.Fatalf("DATABASE_URL is missing from environment variables")
+	}
 
+	// Initialize high-performance Neon connection pool
+	dbPool, err := pgxpool.New(context.Background(), dbConnectionString)
+	if err != nil {
+		log.Fatalf("Unable to connect to database: %v", err)
+	}
+	defer dbPool.Close()
+
+	// Verify cloud database connection is alive
+	if err := dbPool.Ping(context.Background()); err != nil {
+		log.Fatalf("Database ping failed: %v", err)
+	}
+	log.Println("Successfully connected to the Neon Serverless Postgres Pool!")
+
+	// 3. Setup internal queue channel
+	payloadQueue := make(chan gateway.WhatsAppPayload, 1000)
+
+	// 4. Start 10 database queue workers
+	log.Println("Starting cloud database worker pool...")
+	for i := 1; i <= 10; i++ {
+		go gateway.StartWorker(i, payloadQueue, dbPool)
+	}
+
+	// 5. Initialize HTTP Handler
+	appHandler := gateway.NewHandler(payloadQueue)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: appHandler,
 	}
 
-	// 4. Handle Graceful Shutdown
 	go func() {
-		log.Println("Gateway API running on port :8080") // Fixed: Println (Capital P)
-		// Fixed: ListenAndServe (not ListenAndServer)
+		log.Println("Gateway API running on port :8080")
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf("HTTP server failed: %v", err)
 		}
 	}()
 
-	// Wait for termination signals
+	// Graceful Shutdown Sequence
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	<-stop
@@ -52,7 +76,6 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	// Close the channel to let workers finish remaining jobs cleanly
 	close(payloadQueue)
 	log.Println("Gateway stopped cleanly.")
 }
