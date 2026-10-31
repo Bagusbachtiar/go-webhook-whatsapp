@@ -39,7 +39,7 @@ func StartWorker(id int, queue <-chan WhatsAppPayload, dbPool *pgxpool.Pool) {
 		}
 		log.Printf("[Worker %d] Successfully saved message %s to Neon Postgres!", id, payload.MessageID)
 
-		go sendWhatsAppReply(payload.From, fmt.Sprintf("Hi! This is an automated response from my Go Microservice worker pool. I received your message: \"%s\"", payload.TextBody))
+		go sendWhatsAppReply(payload.From, fmt.Sprintf("Hi! This is an automaaated response from my Go Microservice worker pool. I received your message: \"%s\"", payload.TextBody))
 	}
 }
 
