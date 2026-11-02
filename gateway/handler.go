@@ -1,10 +1,17 @@
 package gateway
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 )
 
 // Meta's real deeply-nested JSON structure
@@ -81,6 +88,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 2. HANDLE REAL LIVE MESSAGES (POST REQUEST)
 	if r.Method == http.MethodPost {
+		// --- 🛡️ NEW CRYPTOGRAPHIC SECURITY MIDDLEWARE BLOCK START ---
+		appSecret := os.Getenv("WHATSAPP_APP_SECRET")
+		
+		if appSecret != "" {
+			signatureHeader := r.Header.Get("X-Hub-Signature-256")
+			if signatureHeader == "" {
+				http.Error(w, "Missing payload signature", http.StatusUnauthorized)
+				return
+			}
+
+			// Read raw body bytes into memory buffer
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "Error reading request stream", http.StatusBadRequest)
+				return
+			}
+			// Important: Put the body back so the json.NewDecoder can read it afterward
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			// Meta sends the format as: "sha256=hashed_hexadecimal_string"
+			actualSignature := strings.TrimPrefix(signatureHeader, "sha256=")
+			actualSignatureBytes, err := hex.DecodeString(actualSignature)
+			if err != nil {
+				http.Error(w, "Malformed hex signature", http.StatusUnauthorized)
+				return
+			}
+
+			// Calculate our local HMAC-SHA256 signature
+			mac := hmac.New(sha256.New, []byte(appSecret))
+			mac.Write(bodyBytes)
+			expectedSignatureBytes := mac.Sum(nil)
+
+			// Secure time constant comparison prevents timing side-channel attacks
+			if subtle.ConstantTimeCompare(actualSignatureBytes, expectedSignatureBytes) != 1 {
+				http.Error(w, "Access Denied: Invalid signature verification failed", http.StatusForbidden)
+				return
+			}
+		}
+		// --- 🛡️ NEW CRYPTOGRAPHIC SECURITY MIDDLEWARE BLOCK END ---
+
 		var metaPayload MetaWebhookPayload
 		err := json.NewDecoder(r.Body).Decode(&metaPayload)
 		if err != nil {
@@ -89,11 +136,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Meta sometimes sends status updates (sent, delivered, read) instead of actual messages.
-		// We ensure we only process if there is a real text message present.
 		if len(metaPayload.Entry) == 0 || 
 		   len(metaPayload.Entry[0].Changes) == 0 || 
 		   len(metaPayload.Entry[0].Changes[0].Value.Messages) == 0 {
-			// Acknowledge receipt to Meta for status updates but skip queueing
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(`{"status":"ignored_status_update"}`))
 			return
